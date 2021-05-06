@@ -1,0 +1,626 @@
+def Width = 64;
+def Height = 32;
+def MaxRomSize = 0xe00;
+
+var cyclesPerFrame = 20;
+var disasm = false;
+
+def mem = Array<u8>.new(0x1000);
+
+def V = Array<byte>.new(16);
+var PC: u16 = 0x200;
+var SP: int = 0;
+var I: u16 = 0;
+var delay: u8 = 0;
+var buzzer: u8 = 0;
+def stack = Array<u16>.new(16);
+
+def keys = Array<bool>.new(16);
+var frame = 0;
+
+def screen = Array<u1>.new(Width * Height);
+def lastTerm = Array<byte>.new(Width * Height);
+
+var font: Array<byte> = [
+  0xF0, 0x90, 0x90, 0x90, 0xF0,   // 0
+  0x60, 0x20, 0x20, 0x20, 0x70,   // 1
+  0xF0, 0x10, 0xF0, 0x80, 0xF0,   // 2
+  0xF0, 0x10, 0xF0, 0x10, 0xF0,   // 3
+  0xA0, 0xA0, 0xF0, 0x20, 0x20,   // 4
+  0xF0, 0x80, 0xF0, 0x10, 0xF0,   // 5
+  0xF0, 0x80, 0xF0, 0x90, 0xF0,   // 6
+  0xF0, 0x10, 0x10, 0x10, 0x10,   // 7
+  0xF0, 0x90, 0xF0, 0x90, 0xF0,   // 8
+  0xF0, 0x90, 0xF0, 0x10, 0xF0,   // 9
+  0xF0, 0x90, 0xF0, 0x90, 0x90,   // a
+  0xF0, 0x50, 0x70, 0x50, 0xF0,   // b
+  0xF0, 0x80, 0x80, 0x80, 0xF0,   // c
+  0xF0, 0x50, 0x50, 0x50, 0xF0,   // d
+  0xF0, 0x80, 0xF0, 0x80, 0xF0,   // e
+  0xF0, 0x80, 0xF0, 0x80, 0x80    // f
+];
+
+///////////////////////////////////////////////////////////////////////////////
+// Helpers
+
+def hex4(x: u4) -> byte {
+  def chars = "0123456789abcdef";
+  return chars[x];
+}
+
+def hex8(x: u8) -> string {
+  return [hex4(u4.!(x >> 4)), hex4(u4.!(x & 15))];
+}
+
+def hex16(x: u16) -> string {
+  return [
+    hex4(u4.!((x >> 12))),
+    hex4(u4.!((x >> 8) & 255)),
+    hex4(u4.!((x >> 4) & 255)),
+    hex4(u4.!((x >> 0) & 255))
+  ];
+}
+
+///////////////////////////////////////////////////////////////////////////////
+//
+
+type Instr {
+  case Invalid(code: u16);
+  case ClearScreen;                 // 00E0
+  case Return;                      // 00EE
+  case SetPC(nnn: u16);             // 1NNN
+  case Call(nnn: u16);              // 2NNN
+  case SkipVxEqNN(x: u4, nn: u8);   // 3XNN
+  case SkipVxNeNN(x: u4, nn: u8);   // 4XNN
+  case SkipVxEqVy(x: u4, y: u4);    // 5XY0
+  case SetVxNN(x: u4, nn: u8);      // 6XNN
+  case AddVxNN(x: u4, nn: u8);      // 7XNN
+  case SetVxVy(x: u4, y: u4);       // 8XY0
+  case OrVxVy(x: u4, y: u4);        // 8XY1
+  case AndVxVy(x: u4, y: u4);       // 8XY2
+  case XorVxVy(x: u4, y: u4);       // 8XY3
+  case AddVxVy(x: u4, y: u4);       // 8XY4
+  case SubVxVy(x: u4, y: u4);       // 8XY5
+  case ShrVxVy(x: u4, y: u4);       // 8XY6
+  case RsubVxVy(x: u4, y: u4);      // 8XY7
+  case ShlVxVy(x: u4, y: u4);       // 8XYE
+  case SkipVxNeVy(x: u4, y: u4);    // 9XY0
+  case SetINNN(nnn: u16);           // ANNN
+  case SetPCNNNV0(nnn: u16);        // BNNN
+  case SetVxRandom(x: u4, nn: u8);  // CXNN
+  case Draw(x: u4, y: u4, n: u4);   // DXYN
+  case SkipVxKeyPressed(x: u4);     // EX9E
+  case SkipVxKeyNotPressed(x: u4);  // EXA1
+  case SetVxDelay(x: u4);           // FX07
+  case SetVxWaitKey(x: u4);         // FX0A
+  case SetDelayVx(x: u4);           // FX15
+  case SetBuzzerVx(x: u4);          // FX18
+  case AddIVx(x: u4);               // FX1E
+  case SetIFontVx(x: u4);           // FX29
+  case StoreIBcdVx(x: u4);          // FX33
+  case StoreRegs(x: u4);            // FX55
+  case LoadRegs(x: u4);             // FX65
+}
+
+def decode(addr: u16) -> (Instr, u16) {
+  def b0   = mem[addr];
+  def nn   = mem[addr + 1];
+  def code = (u16.!(b0) << 8) | nn;
+  def x    = u4.!(b0 & 0xf);
+  def y    = u4.!(nn >> 4);
+  def n    = u4.!(nn & 0xf);
+  def nnn  = u16.!(code & 0xfff);
+
+  var instr: Instr;
+  match (b0 >> 4) {
+    0 => match(code) {
+      0x00e0 => instr = Instr.ClearScreen;
+      0x00ee => instr = Instr.Return;
+      _ => instr = Instr.Invalid(code);
+    }
+    1 => instr = Instr.SetPC(nnn);
+    2 => instr = Instr.Call(nnn);
+    3 => instr = Instr.SkipVxEqNN(x, nn);
+    4 => instr = Instr.SkipVxNeNN(x, nn);
+    5 => instr = Instr.SkipVxEqVy(x, y);
+    6 => instr = Instr.SetVxNN(x, nn);
+    7 => instr = Instr.AddVxNN(x, nn);
+    8 => match(n) {
+        0 => instr = Instr.SetVxVy(x, y);
+        1 => instr = Instr.OrVxVy(x, y);
+        2 => instr = Instr.AndVxVy(x, y);
+        3 => instr = Instr.XorVxVy(x, y);
+        4 => instr = Instr.AddVxVy(x, y);
+        5 => instr = Instr.SubVxVy(x, y);
+        6 => instr = Instr.ShrVxVy(x, y);
+        7 => instr = Instr.RsubVxVy(x, y);
+      0xe => instr = Instr.ShlVxVy(x, y);
+        _ => instr = Instr.Invalid(code);
+    }
+    9 => match(n) {
+      0 => instr = Instr.SkipVxNeVy(x, y);
+      _ => instr = Instr.Invalid(code);
+    }
+    0xa => instr = Instr.SetINNN(nnn);
+    0xb => instr = Instr.SetPCNNNV0(nnn);
+    0xc => instr = Instr.SetVxRandom(x, nn);
+    0xd => instr = Instr.Draw(x, y, n);
+    0xe => match(nn) {
+      0x9e => instr = Instr.SkipVxKeyPressed(x);
+      0xa1 => instr = Instr.SkipVxKeyNotPressed(x);
+         _ => instr = Instr.Invalid(code);
+    }
+    0xf => match(nn) {
+      0x07 => instr = Instr.SetVxDelay(x);
+      0x0a => instr = Instr.SetVxWaitKey(x);
+      0x15 => instr = Instr.SetDelayVx(x);
+      0x18 => instr = Instr.SetBuzzerVx(x);
+      0x1e => instr = Instr.AddIVx(x);
+      0x29 => instr = Instr.SetIFontVx(x);
+      0x33 => instr = Instr.StoreIBcdVx(x);
+      0x55 => instr = Instr.StoreRegs(x);
+      0x65 => instr = Instr.LoadRegs(x);
+         _ => instr = Instr.Invalid(code);
+    }
+  }
+  return (instr, code);
+}
+
+def clear() {
+  for (i = 0; i < screen.length; ++i) screen[i] = 0;
+}
+
+def draw(x: u8, y: u8, n: u4) {
+  var vf: byte = 0;
+  for (j = 0; j < n; ++j) {
+    def b = mem[I + j];
+    for (i = 0; i < 8; ++i) {
+      if ((b & (0x80 >> u8.!(i))) != 0) {
+        var addr = ((y + j) & (Height - 1)) * Width + ((x + i) & (Width - 1));
+        vf |= screen[addr];
+        screen[addr] ^= 1;
+      }
+    }
+  }
+  V[0xf] = vf;
+}
+
+def setVandVF(x: u4, xVal: u8, vfVal: u8) {
+  V[x] = xVal;
+  V[0xf] = vfVal;
+}
+
+def boolToByte(b: bool) -> byte { return if(b, 1, 0); }
+
+def exec(instr: Instr) {
+  var nextPC = u16.!(PC + 2);
+
+  match(instr) {
+    Invalid(code) => {}
+
+    ClearScreen => clear();
+
+    Return => nextPC = stack[--SP];
+
+    SetPC(nnn) => nextPC = nnn;
+
+    Call(nnn) => {
+      stack[SP++] = nextPC;
+      nextPC = nnn;
+    }
+
+    SkipVxEqNN(x, nn) => if (V[x] == nn) nextPC += 2;
+
+    SkipVxNeNN(x, nn) => if (V[x] != nn) nextPC += 2;
+
+    SkipVxEqVy(x, y) => if (V[x] == V[y]) nextPC += 2;
+
+    SetVxNN(x, nn) => V[x] = nn;
+
+    AddVxNN(x, nn) => V[x] += nn;
+
+    SetVxVy(x, y) => V[x] = V[y];
+
+    OrVxVy(x, y) => V[x] |= V[y];
+
+    AndVxVy(x, y) => V[x] &= V[y];
+
+    XorVxVy(x, y) => V[x] ^= V[y];
+
+    AddVxVy(x, y) => setVandVF(x, V[x] + V[y], boolToByte(V[x] + V[y] < V[x]));
+
+    SubVxVy(x, y) => setVandVF(x, V[x] - V[y], boolToByte(V[x] > V[y]));
+
+    ShrVxVy(x, y) => setVandVF(x, V[y] >> 1, u8.!(V[y] & 1));
+
+    RsubVxVy(x, y) => setVandVF(x, V[y] - V[x], boolToByte(V[y] > V[x]));
+
+    ShlVxVy(x, y) => setVandVF(x, V[y] << 1, V[y] >> 7);
+
+    SkipVxNeVy(x, y) => if (V[x] != V[y]) nextPC += 2;
+
+    SetINNN(nnn) => I = nnn;
+
+    SetPCNNNV0(nnn) => nextPC = nnn + V[0];
+
+    SetVxRandom(x, nn) => V[x] = u8.!(Random.random(256) & nn);
+
+    Draw(x, y, n) => draw(V[x], V[y], n);
+
+    SkipVxKeyPressed(x) => if (keys[V[x]]) nextPC += 2;
+
+    SkipVxKeyNotPressed(x) => if (!keys[V[x]]) nextPC += 2;
+
+    SetVxDelay(x) => V[x] = delay;
+
+    SetVxWaitKey(x) => { }
+
+    SetDelayVx(x) => delay = V[x];
+
+    SetBuzzerVx(x) => buzzer = V[x];
+
+    AddIVx(x) => I += V[x];
+
+    SetIFontVx(x) => I = u16.!((V[x] & 0xf) * 5);
+
+    StoreIBcdVx(x) => {
+      mem[I + 0] = u8.!(V[x] / 100);
+      mem[I + 1] = u8.!((V[x] / 10) % 10);
+      mem[I + 2] = u8.!(V[x] % 10);
+    }
+
+    StoreRegs(x) => {
+      for (n = 0; n <= x; n++) mem[I + n] = V[n];
+      I += u16.!(x + 1);
+    }
+
+    LoadRegs(x) => {
+      for (n = 0; n <= x; n++) V[n] = mem[I + n];
+      I += u16.!(x + 1);
+    }
+  }
+
+  PC = nextPC;
+}
+
+def runInstrsDisasm(n: int) {
+  System.puts("=== frame ");
+  System.puti(frame);
+  System.puts(" ===");
+  System.ln();
+
+  def b = StringBuilder.new();
+  for (i = 0; i < n; ++i) {
+    def instr = decode(PC);
+    def readRegs = getReadRegs(instr.0);
+    def writeRegs = getWriteRegs(instr.0);
+    b.reset();
+    putDisasm(b, PC, instr.1, instr.0);
+    exec(instr.0);
+    putReadRegs(b, readRegs);
+    putWriteRegs(b, writeRegs);
+    System.puts(b.ln().extract());
+  }
+}
+
+def runInstrs(n: int) {
+  for (i = 0; i < n; ++i) {
+    def instr = decode(PC);
+    exec(instr.0);
+  }
+}
+
+def render() {
+  var curX = -1, curY = -1;
+  for (y = 0; y < Height; ++y) {
+    for (x = 0; x < Width; ++x) {
+      def addr = y * Width + x;
+      var wanted: byte = if(screen[addr] == 1, '#', 32);
+      var have = lastTerm[addr];
+      if (wanted != have) {
+        if (curX != x || curY != y) {
+          Vt100.moveCursor(y, x);
+        }
+        Vt100.putc(wanted);
+        curX++;
+        lastTerm[addr] = wanted;
+      }
+    }
+  }
+  Vt100.moveCursor(Height, 0);
+}
+
+def runFrame() {
+  if (disasm) {
+    runInstrsDisasm(cyclesPerFrame);
+  } else {
+    runInstrs(cyclesPerFrame);
+  }
+  if (delay > 0) delay--;
+  if (buzzer > 0) buzzer--;
+  frame++;
+
+  if (!disasm) {
+    render();
+  }
+}
+
+///////////////////////////////////////////////////////////////////////////////
+// Debug stuff
+
+def putLoc(b: StringBuilder, addr: u16, code: u16, i: Instr) {
+  b.put2("[$%s] %s: ", hex16(PC), hex16(code));
+}
+
+def regStr(x: u4) -> string { return ['v', hex4(x)]; }
+
+def putInstr(b: StringBuilder, instr: Instr) {
+  match(instr) {
+    Invalid(code)       => b.put1("invalid(%s)", hex16(code));
+    ClearScreen         => b.puts("clear");
+    Return              => b.puts("return");
+    SetPC(nnn)          => b.put1("pc := %x", nnn);
+    Call(nnn)           => b.put1("call %x", nnn);
+    SkipVxEqNN(x, nn)   => b.put2("skip if %s == %x", regStr(x), nn);
+    SkipVxNeNN(x, nn)   => b.put2("skip if %s != %x", regStr(x), nn);
+    SkipVxEqVy(x, y)    => b.put2("skip if %s != %s", regStr(x), regStr(y));
+    SetVxNN(x, nn)      => b.put2("%s := %x", regStr(x), nn);
+    AddVxNN(x, nn)      => b.put2("%s += %x", regStr(x), nn);
+    SetVxVy(x, y)       => b.put2("%s := %s", regStr(x), regStr(y));
+    OrVxVy(x, y)        => b.put2("%s |= %s", regStr(x), regStr(y));
+    AndVxVy(x, y)       => b.put2("%s &= %s", regStr(x), regStr(y));
+    XorVxVy(x, y)       => b.put2("%s ^= %s", regStr(x), regStr(y));
+    AddVxVy(x, y)       => b.put2("%s += %s", regStr(x), regStr(y));
+    SubVxVy(x, y)       => b.put2("%s -= %s", regStr(x), regStr(y));
+    ShrVxVy(x, y)       => b.put2("%s := %s >> 1", regStr(x), regStr(y));
+    RsubVxVy(x, y)      => b.put3("%s := %s - %s", regStr(x), regStr(y), regStr(x));
+    ShlVxVy(x, y)       => b.put2("%s := %s << 1", regStr(x), regStr(y));
+    SkipVxNeVy(x, y)    => b.put2("skip if v %s != %s", regStr(x), regStr(y));
+    SetINNN(nnn)        => b.put1("i := %x", nnn);
+    SetPCNNNV0(nnn)     => b.put1("pc := %x + v0", nnn);
+    SetVxRandom(x, nn)  => b.put2("%s := %x", regStr(x), nn);
+    Draw(x, y, n)       => b.put3("sprite %s %s %d", regStr(x), regStr(y), int.!(n));
+    SkipVxKeyPressed(x) => b.put1("skip if %s key pressed", regStr(x));
+    SkipVxKeyNotPressed(x) => b.put1("skip if %s key ~pressed", regStr(x));
+    SetVxDelay(x)       => b.put1("%s := delay", regStr(x));
+    SetVxWaitKey(x)     => b.put1("%s := key", regStr(x));
+    SetDelayVx(x)       => b.put1("delay := %s", regStr(x));
+    SetBuzzerVx(x)      => b.put1("buzzer := %s", regStr(x));
+    AddIVx(x)           => b.put1("i += %s", regStr(x));
+    SetIFontVx(x)       => b.put1("i := hex %s", regStr(x));
+    StoreIBcdVx(x)      => b.put1("bcd %s", regStr(x));
+    StoreRegs(x)        => b.put1("save %s", regStr(x));
+    LoadRegs(x)         => b.put1("load %s", regStr(x));
+  }
+  b.pad(' ', 40);
+}
+
+type ReadReg {
+  // Read values
+  case V(x: u4, val: u8);
+  case VRange(vals: Array<u8>);
+  case SP(val: int);
+  case I(val: u16);
+  case Delay(val: u8);
+  case MemRange(mem: Array<(u16, u8)>);
+  case Stack(i: int, val: u16);
+}
+
+type WriteReg {
+  case SetV(x: u4);
+  case SetVRange(hi: u4);
+  case SetSP;
+  case SetI;
+  case SetDelay;
+  case SetMemRange(lo: u16, hi: u16);
+  case SetStack(i: int);
+  case SetBuzzer;
+}
+
+def putReadRegs(b: StringBuilder, regs: Array<ReadReg>) {
+  if (regs.length == 0) return;
+
+  for (reg in regs) {
+    match (reg) {
+      V(x, val)    => b.put2("%s=%x", regStr(x), val);
+      VRange(vals) => {
+        for (n = 0; n < vals.length; ++n) {
+          b.put2("%s=%x", regStr(u4.!(n)), vals[n]);
+        }
+      }
+      SP(val)    => b.put1("SP=%d", val);
+      I(val)     => b.put1("I=%x", val);
+      Delay(val) => b.put1("Delay=%x", val);
+      MemRange(mems) => {
+        for (mem in mems) {
+          b.put2("mem[%x]=%x", mem.0, mem.1);
+        }
+      }
+      Stack(i, val) => b.put2("stack[%d]=%x", i, val);
+    }
+    b.putc(' ');
+  }
+}
+
+def putWriteRegs(b: StringBuilder, regs: Array<WriteReg>) {
+  if (regs.length == 0) return;
+
+  b.puts(" ==> ");
+
+  for (reg in regs) {
+    match (reg) {
+      SetV(x) => b.put2("%s=%x", regStr(x), V[x]);
+      SetVRange(hi) => {
+        for (n = 0; n <= hi; ++n) {
+          b.put2("%s=%x", regStr(u4.!(n)), V[n]);
+        }
+      }
+      SetSP     => b.put1("SP=%d", SP);
+      SetI      => b.put1("I=%x", I);
+      SetDelay  => b.put1("Delay=%x", delay);
+      SetMemRange(lo, hi) => {
+        for (i = lo; i <= hi; ++i) {
+          b.put2("mem[%x]=%x", i, mem[i]);
+        }
+      }
+      SetStack(i) => b.put2("stack[%d]=%x", i, stack[i]);
+      SetBuzzer   => b.put1("buzzer=%x", buzzer);
+    }
+    b.putc(' ');
+  }
+}
+
+def VReg(x: u4) -> ReadReg { return ReadReg.V(x, V[x]); }
+def VfReg() -> ReadReg { return ReadReg.V(0xf, V[0xf]); }
+def SPReg() -> ReadReg { return ReadReg.SP(SP); }
+def IReg() -> ReadReg { return ReadReg.I(I); }
+def DelayReg() -> ReadReg { return ReadReg.Delay(delay); }
+def StackReg(i: int) -> ReadReg { return ReadReg.Stack(i, stack[i]); }
+
+def VRangeReg(hi: u16) -> ReadReg {
+  var arr = Array<u8>.new(hi + 1);
+  for (i = 0; i <= hi; ++i) {
+    arr[i] = V[i];
+  }
+  return ReadReg.VRange(arr);
+}
+
+def MemRangeReg(lo: u16, hi: u16) -> ReadReg {
+  var arr = Array<(u16, u8)>.new(hi - lo + 1);
+  for (i = lo; i <= hi; ++i) {
+    arr[i - lo] = (lo, mem[lo]);
+  }
+  return ReadReg.MemRange(arr);
+}
+
+def getReadRegs(instr: Instr) -> Array<ReadReg> {
+  match(instr) {
+    Invalid                => ;
+    ClearScreen            => ;
+    Return                 => return [StackReg(SP + 2), SPReg()];
+    SetPC                  => ;
+    Call                   => return [SPReg()];
+    SkipVxEqNN(x, nn)      => return [VReg(x)];
+    SkipVxNeNN(x, nn)      => return [VReg(x)];
+    SkipVxEqVy(x, y)       => return [VReg(x), VReg(y)];
+    SetVxNN(x, nn)         => ;
+    AddVxNN(x, nn)         => return [VReg(x)];
+    SetVxVy(x, y)          => return [VReg(y)];
+    OrVxVy(x, y)           => return [VReg(x), VReg(y)];
+    AndVxVy(x, y)          => return [VReg(x), VReg(y)];
+    XorVxVy(x, y)          => return [VReg(x), VReg(y)];
+    AddVxVy(x, y)          => return [VReg(x), VReg(y)];
+    SubVxVy(x, y)          => return [VReg(x), VReg(y)];
+    ShrVxVy(x, y)          => return [VReg(x), VReg(y)];
+    RsubVxVy(x, y)         => return [VReg(x), VReg(y)];
+    ShlVxVy(x, y)          => return [VReg(x), VReg(y)];
+    SkipVxNeVy(x, y)       => return [VReg(x), VReg(y)];
+    SetINNN(nnn)           => ;
+    SetPCNNNV0(nnn)        => return [VReg(0)];
+    SetVxRandom(x, nn)     => ;
+    Draw(x, y, n)          => return [VReg(x), VReg(y)];
+    SkipVxKeyPressed(x)    => return [VReg(x)];
+    SkipVxKeyNotPressed(x) => return [VReg(x)];
+    SetVxDelay(x)          => return [DelayReg()];
+    SetVxWaitKey(x)        => ;
+    SetDelayVx(x)          => return [VReg(x)];
+    SetBuzzerVx(x)         => return [VReg(x)];
+    AddIVx(x)              => return [IReg(), VReg(x)];
+    SetIFontVx(x)          => return [VReg(x)];
+    StoreIBcdVx(x)         => return [VReg(x)];
+    StoreRegs(x)           => return [VRangeReg(x), IReg()];
+    LoadRegs(x)            => return [MemRangeReg(I, I+x), IReg()];
+  }
+
+  return [];
+}
+
+def getWriteRegs(instr: Instr) -> Array<WriteReg> {
+  match(instr) {
+    Invalid                => ;
+    ClearScreen            => ;
+    Return                 => return [WriteReg.SetSP];
+    SetPC                  => ;
+    Call                   => return [WriteReg.SetStack(SP), WriteReg.SetSP];
+    SkipVxEqNN(x, nn)      => ;
+    SkipVxNeNN(x, nn)      => ;
+    SkipVxEqVy(x, y)       => ;
+    SetVxNN(x, nn)         => return [WriteReg.SetV(x)];
+    AddVxNN(x, nn)         => return [WriteReg.SetV(x)];
+    SetVxVy(x, y)          => return [WriteReg.SetV(x)];
+    OrVxVy(x, y)           => return [WriteReg.SetV(x)];
+    AndVxVy(x, y)          => return [WriteReg.SetV(x)];
+    XorVxVy(x, y)          => return [WriteReg.SetV(x)];
+    AddVxVy(x, y)          => return [WriteReg.SetV(x), WriteReg.SetV(0xf)];
+    SubVxVy(x, y)          => return [WriteReg.SetV(x), WriteReg.SetV(0xf)];
+    ShrVxVy(x, y)          => return [WriteReg.SetV(x), WriteReg.SetV(0xf)];
+    RsubVxVy(x, y)         => return [WriteReg.SetV(x), WriteReg.SetV(0xf)];
+    ShlVxVy(x, y)          => return [WriteReg.SetV(x), WriteReg.SetV(0xf)];
+    SkipVxNeVy(x, y)       => return [WriteReg.SetV(x), WriteReg.SetV(0xf)];
+    SetINNN(nnn)           => return [WriteReg.SetI];
+    SetPCNNNV0(nnn)        => ;
+    SetVxRandom(x, nn)     => return [WriteReg.SetV(x)];
+    Draw(x, y, n)          => return [WriteReg.SetV(0xf)];
+    SkipVxKeyPressed(x)    => ;
+    SkipVxKeyNotPressed(x) => ;
+    SetVxDelay(x)          => return [WriteReg.SetV(x)];
+    SetVxWaitKey(x)        => return [WriteReg.SetV(x)];
+    SetDelayVx(x)          => return [WriteReg.SetDelay];
+    SetBuzzerVx(x)         => return [WriteReg.SetBuzzer];
+    AddIVx(x)              => return [WriteReg.SetI];
+    SetIFontVx(x)          => return [WriteReg.SetI];
+    StoreIBcdVx(x)         => return [WriteReg.SetMemRange(I, u16.!(I+2))];
+    StoreRegs(x)           => return [WriteReg.SetMemRange(I, I+x), WriteReg.SetI];
+    LoadRegs(x)            => return [WriteReg.SetVRange(x), WriteReg.SetI];
+  }
+
+  return [];
+}
+
+def putDisasm(b: StringBuilder, addr: u16, code: u16, instr: Instr) {
+  putLoc(b, addr, code, instr);
+  putInstr(b, instr);
+}
+
+///////////////////////////////////////////////////////////////////////////////
+//
+
+def load(rom: Array<byte>) {
+  def length = if(rom.length < MaxRomSize, rom.length, MaxRomSize);
+
+  // Copy font to address 0x0000
+  for (i = 0; i < font.length; ++i) {
+    mem[0 + i] = font[i];
+  }
+
+  // Copy ROM to address 0x0200
+  for (i = 0; i < length; ++i) {
+    mem[0x200 + i] = rom[i];
+  }
+}
+
+def frameLoop(ticks: u32) {
+  runFrame();
+}
+
+def keypress(key: int) {
+}
+
+def main(args: Array<string>) -> int {
+  if (args.length < 2) {
+    System.puts("Usage: chip8 <rom> <cy/frame>\n");
+    return 1;
+  }
+
+  def rom = System.fileLoad(args[0]);
+  cyclesPerFrame = Ints.parseDecimal(args[1], 0).1;
+
+  load(rom);
+
+  Vt100.eraseScreen();
+
+  def animator = Animator.new(frameLoop, keypress);
+  animator.setFPS(u32.!(cyclesPerFrame));
+  animator.run();
+  return 0;
+}
