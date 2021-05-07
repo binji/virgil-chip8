@@ -656,7 +656,7 @@ def main(args: Array<string>) -> int {
   Vt100.eraseScreen();
 
   def animator = Animator.new(frameLoop, keypress);
-  animator.setFPS(u32.!(cyclesPerFrame));
+  animator.setFPS(60);
   animator.run();
   return 0;
 }
