@@ -187,8 +187,8 @@ def draw(x: u8, y: u8, n: u4) {
 }
 
 def setVandVF(x: u4, xVal: u8, vfVal: u8) {
-  V[x] = xVal;
   V[0xf] = vfVal;
+  V[x] = xVal;
 }
 
 def boolToByte(b: bool) -> byte { return if(b, 1, 0); }
