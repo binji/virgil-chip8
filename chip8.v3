@@ -167,14 +167,14 @@ def decode(addr: u16) -> (Instr, u16) {
 }
 
 def clear() {
-  for (i = 0; i < screen.length; ++i) screen[i] = 0;
+  for (i < screen.length) screen[i] = 0;
 }
 
 def draw(x: u8, y: u8, n: u4) {
   var vf: byte = 0;
-  for (j = 0; j < n; ++j) {
+  for (j < n) {
     def b = mem[I + j];
-    for (i = 0; i < 8; ++i) {
+    for (i < 8) {
       if ((b & (0x80 >> u8.!(i))) != 0) {
         var addr = ((y + j) & (Height - 1)) * Width + ((x + i) & (Width - 1));
         vf |= screen[addr];
@@ -290,7 +290,7 @@ def runInstrsDisasm(n: int) {
   System.ln();
 
   def b = StringBuilder.new();
-  for (i = 0; i < n; ++i) {
+  for (i < n) {
     def instr = decode(PC);
     def readRegs = getReadRegs(instr.0);
     def writeRegs = getWriteRegs(instr.0);
@@ -304,7 +304,7 @@ def runInstrsDisasm(n: int) {
 }
 
 def runInstrs(n: int) {
-  for (i = 0; i < n; ++i) {
+  for (i < n) {
     def instr = decode(PC);
     exec(instr.0);
   }
@@ -312,8 +312,8 @@ def runInstrs(n: int) {
 
 def render() {
   var curX = -1, curY = -1;
-  for (y = 0; y < Height; ++y) {
-    for (x = 0; x < Width; ++x) {
+  for (y < Height) {
+    for (x < Width) {
       def addr = y * Width + x;
       var wanted: byte = if(screen[addr] == 1, '#', 32);
       var have = lastTerm[addr];
@@ -424,7 +424,7 @@ def putReadRegs(b: StringBuilder, regs: Array<ReadReg>) {
     match (reg) {
       V(x, val)    => b.put2("%s=%x", regStr(x), val);
       VRange(vals) => {
-        for (n = 0; n < vals.length; ++n) {
+        for (n < vals.length) {
           b.put2("%s=%x", regStr(u4.!(n)), vals[n]);
         }
       }
@@ -589,12 +589,12 @@ def load(rom: Array<byte>) {
   def length = if(rom.length < MaxRomSize, rom.length, MaxRomSize);
 
   // Copy font to address 0x0000
-  for (i = 0; i < font.length; ++i) {
+  for (i < font.length) {
     mem[0 + i] = font[i];
   }
 
   // Copy ROM to address 0x0200
-  for (i = 0; i < length; ++i) {
+  for (i < length) {
     mem[0x200 + i] = rom[i];
   }
 }
