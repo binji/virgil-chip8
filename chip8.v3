@@ -20,6 +20,7 @@ var frame = 0;
 
 def screen = Array<u1>.new(Width * Height);
 def lastTerm = Array<byte>.new(Width * Height);
+var oldBuzzer = false;
 
 var font: Array<byte> = [
   0xF0, 0x90, 0x90, 0x90, 0xF0,   // 0
@@ -310,7 +311,39 @@ def runInstrs(n: int) {
   }
 }
 
+def drawHline(x1: int, x2: int, y: int, c: byte) {
+  Vt100.moveCursor(y, x1);
+  for (x < x2 - x1 + 1) Vt100.putc(c);
+}
+
+def drawVline(x: int, y1: int, y2: int, c: byte) {
+  for (j < y2 - y1 + 1) {
+    Vt100.moveCursor(y1 + j, x);
+    Vt100.putc(c);
+  }
+}
+
 def render() {
+  def hasBuzzer = buzzer > 1;
+  if (hasBuzzer != oldBuzzer) {
+    // Draw border for "buzzer"
+    var c = ' ';
+    if(hasBuzzer) {
+      Vt100.bgRed();
+      c = '*';
+    } else {
+      Vt100.setNormalBackground();
+    }
+
+    drawHline(1, Width + 2, 1, c);          // Draw top
+    drawVline(1, 2, Height + 1, c);         // Draw left
+    drawVline(Width + 2, 2, Height + 1, c); // Draw right
+    drawHline(1, Width + 2, Height + 2, c); // Draw bottom
+
+    Vt100.setNormalBackground();
+    oldBuzzer = hasBuzzer;
+  }
+
   var curX = -1, curY = -1;
   for (y < Height) {
     for (x < Width) {
@@ -319,7 +352,9 @@ def render() {
       var have = lastTerm[addr];
       if (wanted != have) {
         if (curX != x || curY != y) {
-          Vt100.moveCursor(y, x);
+          curX = x + 2;
+          curY = y + 2;
+          Vt100.moveCursor(curY, curX);
         }
         Vt100.putc(wanted);
         curX++;
@@ -327,7 +362,7 @@ def render() {
       }
     }
   }
-  Vt100.moveCursor(Height, 0);
+  Vt100.moveCursor(Height + 3, 1);
 }
 
 def runFrame() {
@@ -604,6 +639,7 @@ def frameLoop(ticks: u32) {
 }
 
 def keypress(key: int) {
+  // TODO: not quite sure how to get keydown vs. keyup here
 }
 
 def main(args: Array<string>) -> int {
