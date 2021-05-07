@@ -230,11 +230,11 @@ def exec(instr: Instr) {
 
     AddVxVy(x, y) => setVandVF(x, V[x] + V[y], boolToByte(V[x] + V[y] < V[x]));
 
-    SubVxVy(x, y) => setVandVF(x, V[x] - V[y], boolToByte(V[x] > V[y]));
+    SubVxVy(x, y) => setVandVF(x, V[x] - V[y], boolToByte(V[x] >= V[y]));
 
     ShrVxVy(x, y) => setVandVF(x, V[y] >> 1, u8.!(V[y] & 1));
 
-    RsubVxVy(x, y) => setVandVF(x, V[y] - V[x], boolToByte(V[y] > V[x]));
+    RsubVxVy(x, y) => setVandVF(x, V[y] - V[x], boolToByte(V[y] >= V[x]));
 
     ShlVxVy(x, y) => setVandVF(x, V[y] << 1, V[y] >> 7);
 
