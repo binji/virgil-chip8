@@ -1,5 +1,5 @@
-def Width = 64;
-def Height = 32;
+def Width = 64, Height = 32;
+def HiresWidth = 128, HiresHeight = 64;
 def MaxRomSize = 0xe00;
 
 // Quirks following Octo's descriptions, see:
@@ -22,16 +22,18 @@ var SP: int = 0;
 var I: u16 = 0;
 var delay: u8 = 0;
 var buzzer: u8 = 0;
+var hires = false;              // SuperChip extension
 def stack = Array<u16>.new(16);
+def flags = Array<u8>.new(16);  // SuperChip extension
 
 def keys = Array<bool>.new(16);
 var frame = 0;
 
-def screen = Array<u1>.new(Width * Height);
-def lastTerm = Array<byte>.new(Width * Height);
+def screen = Array<u1>.new(HiresWidth * HiresHeight);
+def lastTerm = Array<byte>.new(HiresWidth * HiresHeight);
 var oldBuzzer = false;
 
-// Octo's font: https://github.com/JohnEarnest/Octo
+// Octo's fonts: https://github.com/JohnEarnest/Octo
 var font: Array<byte> = [
   0xF0, 0x90, 0x90, 0x90, 0xF0,   // 0
   0x60, 0x20, 0x20, 0x20, 0x70,   // 1
@@ -49,6 +51,24 @@ var font: Array<byte> = [
   0xF0, 0x50, 0x50, 0x50, 0xF0,   // d
   0xF0, 0x80, 0xF0, 0x80, 0xF0,   // e
   0xF0, 0x80, 0xF0, 0x80, 0x80    // f
+];
+var bigfont: Array<byte> = [
+  0xFF, 0xFF, 0xC3, 0xC3, 0xC3, 0xC3, 0xC3, 0xC3, 0xFF, 0xFF, // 0
+  0x18, 0x78, 0x78, 0x18, 0x18, 0x18, 0x18, 0x18, 0xFF, 0xFF, // 1
+  0xFF, 0xFF, 0x03, 0x03, 0xFF, 0xFF, 0xC0, 0xC0, 0xFF, 0xFF, // 2
+  0xFF, 0xFF, 0x03, 0x03, 0xFF, 0xFF, 0x03, 0x03, 0xFF, 0xFF, // 3
+  0xC3, 0xC3, 0xC3, 0xC3, 0xFF, 0xFF, 0x03, 0x03, 0x03, 0x03, // 4
+  0xFF, 0xFF, 0xC0, 0xC0, 0xFF, 0xFF, 0x03, 0x03, 0xFF, 0xFF, // 5
+  0xFF, 0xFF, 0xC0, 0xC0, 0xFF, 0xFF, 0xC3, 0xC3, 0xFF, 0xFF, // 6
+  0xFF, 0xFF, 0x03, 0x03, 0x06, 0x0C, 0x18, 0x18, 0x18, 0x18, // 7
+  0xFF, 0xFF, 0xC3, 0xC3, 0xFF, 0xFF, 0xC3, 0xC3, 0xFF, 0xFF, // 8
+  0xFF, 0xFF, 0xC3, 0xC3, 0xFF, 0xFF, 0x03, 0x03, 0xFF, 0xFF, // 9
+  0x7E, 0xFF, 0xC3, 0xC3, 0xC3, 0xFF, 0xFF, 0xC3, 0xC3, 0xC3, // a
+  0xFC, 0xFC, 0xC3, 0xC3, 0xFC, 0xFC, 0xC3, 0xC3, 0xFC, 0xFC, // b
+  0x3C, 0xFF, 0xC3, 0xC0, 0xC0, 0xC0, 0xC0, 0xC3, 0xFF, 0x3C, // c
+  0xFC, 0xFE, 0xC3, 0xC3, 0xC3, 0xC3, 0xC3, 0xC3, 0xFE, 0xFC, // d
+  0xFF, 0xFF, 0xC0, 0xC0, 0xFF, 0xFF, 0xC0, 0xC0, 0xFF, 0xFF, // e
+  0xFF, 0xFF, 0xC0, 0xC0, 0xFF, 0xFF, 0xC0, 0xC0, 0xC0, 0xC0  // f
 ];
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -77,8 +97,14 @@ def hex16(x: u16) -> string {
 
 type Instr {
   case Invalid(code: u16);
+  case ScrollDown(n: u4);           // 00CN  SuperChip extension
   case ClearScreen;                 // 00E0
   case Return;                      // 00EE
+  case ScrollRight;                 // 00FB  SuperChip extension
+  case ScrollLeft;                  // 00FC  SuperChip extension
+  case Exit;                        // 00FD  SuperChip extension
+  case LoRes;                       // 00FE  SuperChip extension
+  case HiRes;                       // 00FF  SuperChip extension
   case SetPC(nnn: u16);             // 1NNN
   case Call(nnn: u16);              // 2NNN
   case SkipVxEqNN(x: u4, nn: u8);   // 3XNN
@@ -108,9 +134,12 @@ type Instr {
   case SetBuzzerVx(x: u4);          // FX18
   case AddIVx(x: u4);               // FX1E
   case SetIFontVx(x: u4);           // FX29
+  case SetIBigFontVx(x: u4);        // FX30  SuperChip extension
   case StoreIBcdVx(x: u4);          // FX33
   case StoreRegs(x: u4);            // FX55
   case LoadRegs(x: u4);             // FX65
+  case SaveFlags(x: u3);            // FX75  SuperChip extension
+  case LoadFlags(x: u3);            // FX85  SuperChip extension
 }
 
 def decode(addr: u16) -> (Instr, u16) {
@@ -124,10 +153,20 @@ def decode(addr: u16) -> (Instr, u16) {
 
   var instr: Instr;
   match (b0 >> 4) {
-    0 => match(code) {
-      0x00e0 => instr = Instr.ClearScreen;
-      0x00ee => instr = Instr.Return;
-      _ => instr = Instr.Invalid(code);
+    0 => {
+      if (y == 0xc) {
+        instr = Instr.ScrollDown(n);
+      } else {
+        match(code) {
+          0x00e0 => instr = Instr.ClearScreen;
+          0x00ee => instr = Instr.Return;
+          0x00fb => instr = Instr.ScrollRight;
+          0x00fc => instr = Instr.ScrollLeft;
+          0x00fe => instr = Instr.LoRes;
+          0x00ff => instr = Instr.HiRes;
+          _ => instr = Instr.Invalid(code);
+        }
+      }
     }
     1 => instr = Instr.SetPC(nnn);
     2 => instr = Instr.Call(nnn);
@@ -171,6 +210,8 @@ def decode(addr: u16) -> (Instr, u16) {
       0x33 => instr = Instr.StoreIBcdVx(x);
       0x55 => instr = Instr.StoreRegs(x);
       0x65 => instr = Instr.LoadRegs(x);
+      0x75 => instr = Instr.SaveFlags(u3.!(x));
+      0x85 => instr = Instr.LoadFlags(u3.!(x));
          _ => instr = Instr.Invalid(code);
     }
   }
@@ -181,22 +222,76 @@ def clear() {
   for (i < screen.length) screen[i] = 0;
 }
 
+def getWidth() -> int { return if(hires, HiresWidth, Width); }
+def getHeight() -> int { return if(hires, HiresHeight, Height); }
+
 def draw(x: u8, y: u8, n: u4) {
+  if (n == 0) return draw16x16(x, y);  // SuperChip extension
+
+  def dw = getWidth(), dh = getHeight();
+
   var vf: byte = 0;
   for (j < n) {
     def b = mem[I + j];
     for (i < 8) {
       if ((b & (0x80 >> u8.!(i))) != 0) {
         def dstX = x + i, dstY = y + j;
-        if (clipQuirks && (dstX >= Width || dstY >= Height)) continue;
+        if (clipQuirks && (dstX >= dw || dstY >= dh)) continue;
 
-        var addr = (dstY & (Height - 1)) * Width + (dstX & (Width - 1));
+        var addr = (dstY & (dh - 1)) * dw + (dstX & (dw - 1));
         vf |= screen[addr];
         screen[addr] ^= 1;
       }
     }
   }
   V[0xf] = vf;
+}
+
+def draw16x16(x: u8, y: u8) {
+  def dw = getWidth(), dh = getHeight();
+
+  var vf: byte = 0;
+  for (j < 16) {
+    def b : u16 = (u16.!(mem[I + j * 2]) << 8) | mem[I + j * 2 + 1];
+    for (i < 16) {
+      if ((b & (0x8000 >> u8.!(i))) != 0) {
+        def dstX = x + i, dstY = y + j;
+        if (clipQuirks && (dstX >= dw || dstY >= dh)) continue;
+
+        var addr = (dstY & (dh - 1)) * dw + (dstX & (dw - 1));
+        vf |= screen[addr];
+        screen[addr] ^= 1;
+      }
+    }
+  }
+  V[0xf] = vf;
+}
+
+def scrollDown(n: u4) {
+  def dw = getWidth(), dh = getHeight();
+  for (y = dh - 1; y >= 0; --y) {
+    for (x < dw) {
+      screen[y * dw + x] = if(y >= n, screen[(y - n) * dw + x], 0);
+    }
+  }
+}
+
+def scrollRight() {
+  def dw = getWidth(), dh = getHeight();
+  for (y < dh) {
+    for (x = dw - 1; x >= 0; --x) {
+      screen[y * dw + x] = if(x >= 1, screen[y * dw + (x - 1)], 0);
+    }
+  }
+}
+
+def scrollLeft() {
+  def dw = getWidth(), dh = getHeight();
+  for (y < dh) {
+    for (x < dw) {
+      screen[y * dw + x] = if(x < dw-1, screen[y * dw + x + 1], 0);
+    }
+  }
 }
 
 def setVandVF(x: u4, xVal: u8, vfVal: u8) {
@@ -216,6 +311,18 @@ def exec(instr: Instr) {
 
   match(instr) {
     Invalid(code) => {}
+
+    ScrollDown(n) => scrollDown(n);
+
+    ScrollRight => scrollRight();
+
+    ScrollLeft => scrollLeft();
+
+    Exit => {}  // TODO
+
+    LoRes => { hires = false; clear(); }
+
+    HiRes => { hires = true; clear(); }
 
     ClearScreen => clear();
 
@@ -290,6 +397,8 @@ def exec(instr: Instr) {
 
     SetIFontVx(x) => I = u16.!((V[x] & 0xf) * 5);
 
+    SetIBigFontVx(x) => I = u16.!(80 + (V[x] & 0xf) * 10);
+
     StoreIBcdVx(x) => {
       mem[I + 0] = u8.!(V[x] / 100);
       mem[I + 1] = u8.!((V[x] / 10) % 10);
@@ -304,6 +413,14 @@ def exec(instr: Instr) {
     LoadRegs(x) => {
       for (n = 0; n <= x; n++) V[n] = mem[I + n];
       if (!loadStoreQuirks) I += u16.!(x + 1);
+    }
+
+    SaveFlags(x) => {
+      for (n = 0; n <= x; n++) flags[n] = V[n];
+    }
+
+    LoadFlags(x) => {
+      for (n = 0; n <= x; n++) V[n] = flags[n];
     }
   }
 
@@ -350,6 +467,8 @@ def drawVline(x: int, y1: int, y2: int, c: byte) {
 }
 
 def render() {
+  def dw = getWidth(), dh = getHeight();
+
   def hasBuzzer = buzzer > 1;
   if (hasBuzzer != oldBuzzer) {
     // Draw border for "buzzer"
@@ -361,19 +480,19 @@ def render() {
       Vt100.setNormalBackground();
     }
 
-    drawHline(1, Width + 2, 1, c);          // Draw top
-    drawVline(1, 2, Height + 1, c);         // Draw left
-    drawVline(Width + 2, 2, Height + 1, c); // Draw right
-    drawHline(1, Width + 2, Height + 2, c); // Draw bottom
+    drawHline(1, dw + 2, 1, c);       // Draw top
+    drawVline(1, 2, dh + 1, c);       // Draw left
+    drawVline(dw + 2, 2, dh + 1, c);  // Draw right
+    drawHline(1, dw + 2, dh + 2, c);  // Draw bottom
 
     Vt100.setNormalBackground();
     oldBuzzer = hasBuzzer;
   }
 
   var curX = -1, curY = -1;
-  for (y < Height) {
-    for (x < Width) {
-      def addr = y * Width + x;
+  for (y < dh) {
+    for (x < dw) {
+      def addr = y * dw + x;
       var wanted: byte = if(screen[addr] == 1, '#', 32);
       var have = lastTerm[addr];
       if (wanted != have) {
@@ -388,7 +507,7 @@ def render() {
       }
     }
   }
-  Vt100.moveCursor(Height + 3, 1);
+  Vt100.moveCursor(dh + 3, 1);
 }
 
 def runFrame() {
@@ -418,8 +537,14 @@ def regStr(x: u4) -> string { return ['v', hex4(x)]; }
 def putInstr(b: StringBuilder, instr: Instr) {
   match(instr) {
     Invalid(code)       => b.put1("invalid(%s)", hex16(code));
+    ScrollDown(n)       => b.put1("scroll-down(%d)", n);
     ClearScreen         => b.puts("clear");
     Return              => b.puts("return");
+    ScrollRight         => b.puts("scroll-right");
+    ScrollLeft          => b.puts("scroll-left");
+    Exit                => b.puts("exit");
+    LoRes               => b.puts("lores");
+    HiRes               => b.puts("hires");
     SetPC(nnn)          => b.put1("pc := %x", nnn);
     Call(nnn)           => b.put1("call %x", nnn);
     SkipVxEqNN(x, nn)   => b.put2("skip if %s == %x", regStr(x), nn);
@@ -449,9 +574,12 @@ def putInstr(b: StringBuilder, instr: Instr) {
     SetBuzzerVx(x)      => b.put1("buzzer := %s", regStr(x));
     AddIVx(x)           => b.put1("i += %s", regStr(x));
     SetIFontVx(x)       => b.put1("i := hex %s", regStr(x));
+    SetIBigFontVx(x)    => b.put1("i := bighex %s", regStr(x));
     StoreIBcdVx(x)      => b.put1("bcd %s", regStr(x));
     StoreRegs(x)        => b.put1("save %s", regStr(x));
     LoadRegs(x)         => b.put1("load %s", regStr(x));
+    SaveFlags(x)        => b.put1("saveflags %s", regStr(x));
+    LoadFlags(x)        => b.put1("loadflags %s", regStr(x));
   }
   b.pad(' ', 40);
 }
@@ -465,6 +593,7 @@ type ReadReg {
   case Delay(val: u8);
   case MemRange(mem: Array<(u16, u8)>);
   case Stack(i: int, val: u16);
+  case FlagRange(flags: Array<u8>);
 }
 
 type WriteReg {
@@ -476,6 +605,7 @@ type WriteReg {
   case SetMemRange(lo: u16, hi: u16);
   case SetStack(i: int);
   case SetBuzzer;
+  case SetFlagRange(hi: u3);
 }
 
 def putReadRegs(b: StringBuilder, regs: Array<ReadReg>) {
@@ -498,6 +628,11 @@ def putReadRegs(b: StringBuilder, regs: Array<ReadReg>) {
         }
       }
       Stack(i, val) => b.put2("stack[%d]=%x", i, val);
+      FlagRange(vals) => {
+        for (n < vals.length) {
+          b.put2("%d=%x", n, vals[n]);
+        }
+      }
     }
     b.putc(' ');
   }
@@ -526,6 +661,11 @@ def putWriteRegs(b: StringBuilder, regs: Array<WriteReg>) {
       }
       SetStack(i) => b.put2("stack[%d]=%x", i, stack[i]);
       SetBuzzer   => b.put1("buzzer=%x", buzzer);
+      SetFlagRange(hi) => {
+        for (n = 0; n <= hi; ++n) {
+          b.put2("%s=%x", n, flags[n]);
+        }
+      }
     }
     b.putc(' ');
   }
@@ -554,11 +694,25 @@ def MemRangeReg(lo: u16, hi: u16) -> ReadReg {
   return ReadReg.MemRange(arr);
 }
 
+def FlagRangeReg(hi: u16) -> ReadReg {
+  var arr = Array<u8>.new(hi + 1);
+  for (i = 0; i <= hi; ++i) {
+    arr[i] = flags[i];
+  }
+  return ReadReg.FlagRange(arr);
+}
+
 def getReadRegs(instr: Instr) -> Array<ReadReg> {
   match(instr) {
     Invalid                => ;
+    ScrollDown(n)          => ;
     ClearScreen            => ;
     Return                 => return [StackReg(SP + 2), SPReg()];
+    ScrollRight            => ;
+    ScrollLeft             => ;
+    Exit                   => ;
+    LoRes                  => ;
+    HiRes                  => ;
     SetPC                  => ;
     Call                   => return [SPReg()];
     SkipVxEqNN(x, nn)      => return [VReg(x)];
@@ -588,9 +742,12 @@ def getReadRegs(instr: Instr) -> Array<ReadReg> {
     SetBuzzerVx(x)         => return [VReg(x)];
     AddIVx(x)              => return [IReg(), VReg(x)];
     SetIFontVx(x)          => return [VReg(x)];
+    SetIBigFontVx(x)       => return [VReg(x)];
     StoreIBcdVx(x)         => return [VReg(x)];
     StoreRegs(x)           => return [VRangeReg(x), IReg()];
     LoadRegs(x)            => return [MemRangeReg(I, I+x), IReg()];
+    SaveFlags(x)           => return [VRangeReg(x)];
+    LoadFlags(x)           => return [FlagRangeReg(x)];
   }
 
   return [];
@@ -599,8 +756,14 @@ def getReadRegs(instr: Instr) -> Array<ReadReg> {
 def getWriteRegs(instr: Instr) -> Array<WriteReg> {
   match(instr) {
     Invalid                => ;
+    ScrollDown(n)          => ;
     ClearScreen            => ;
     Return                 => return [WriteReg.SetSP];
+    ScrollRight            => ;
+    ScrollLeft             => ;
+    Exit                   => ;
+    LoRes                  => ;
+    HiRes                  => ;
     SetPC                  => ;
     Call                   => return [WriteReg.SetStack(SP), WriteReg.SetSP];
     SkipVxEqNN(x, nn)      => ;
@@ -630,9 +793,12 @@ def getWriteRegs(instr: Instr) -> Array<WriteReg> {
     SetBuzzerVx(x)         => return [WriteReg.SetBuzzer];
     AddIVx(x)              => return [WriteReg.SetI];
     SetIFontVx(x)          => return [WriteReg.SetI];
+    SetIBigFontVx(x)       => return [WriteReg.SetI];
     StoreIBcdVx(x)         => return [WriteReg.SetMemRange(I, u16.!(I+2))];
     StoreRegs(x)           => return [WriteReg.SetMemRange(I, I+x), WriteReg.SetI];
     LoadRegs(x)            => return [WriteReg.SetVRange(x), WriteReg.SetI];
+    SaveFlags(x)           => return [WriteReg.SetFlagRange(x)];
+    LoadFlags(x)           => return [WriteReg.SetVRange(x)];
   }
 
   return [];
@@ -649,10 +815,9 @@ def putDisasm(b: StringBuilder, addr: u16, code: u16, instr: Instr) {
 def load(rom: Array<byte>) {
   def length = if(rom.length < MaxRomSize, rom.length, MaxRomSize);
 
-  // Copy font to address 0x0000
-  for (i < font.length) {
-    mem[0 + i] = font[i];
-  }
+  // Copy fonts to address 0x0000
+  for (i < font.length) { mem[0 + i] = font[i]; }
+  for (i < bigfont.length) { mem[font.length + i] = bigfont[i]; }
 
   // Copy ROM to address 0x0200
   for (i < length) {
