@@ -2,6 +2,15 @@ def Width = 64;
 def Height = 32;
 def MaxRomSize = 0xe00;
 
+// Quirks following Octo's descriptions, see:
+//   https://github.com/JohnEarnest/Octo
+var shiftQuirks = false;
+var loadStoreQuirks = false;
+var vfOrderQuirks = false;
+var clipQuirks = false;
+var jumpQuirks = false;
+var logicQuirks = false;
+
 var cyclesPerFrame = 20;
 var disasm = false;
 
@@ -22,6 +31,7 @@ def screen = Array<u1>.new(Width * Height);
 def lastTerm = Array<byte>.new(Width * Height);
 var oldBuzzer = false;
 
+// Octo's font: https://github.com/JohnEarnest/Octo
 var font: Array<byte> = [
   0xF0, 0x90, 0x90, 0x90, 0xF0,   // 0
   0x60, 0x20, 0x20, 0x20, 0x70,   // 1
@@ -177,7 +187,10 @@ def draw(x: u8, y: u8, n: u4) {
     def b = mem[I + j];
     for (i < 8) {
       if ((b & (0x80 >> u8.!(i))) != 0) {
-        var addr = ((y + j) & (Height - 1)) * Width + ((x + i) & (Width - 1));
+        def dstX = x + i, dstY = y + j;
+        if (clipQuirks && (dstX >= Width || dstY >= Height)) continue;
+
+        var addr = (dstY & (Height - 1)) * Width + (dstX & (Width - 1));
         vf |= screen[addr];
         screen[addr] ^= 1;
       }
@@ -187,8 +200,13 @@ def draw(x: u8, y: u8, n: u4) {
 }
 
 def setVandVF(x: u4, xVal: u8, vfVal: u8) {
-  V[0xf] = vfVal;
-  V[x] = xVal;
+  if (vfOrderQuirks) {
+    V[0xf] = vfVal;
+    V[x] = xVal;
+  } else {
+    V[x] = xVal;
+    V[0xf] = vfVal;
+  }
 }
 
 def boolToByte(b: bool) -> byte { return if(b, 1, 0); }
@@ -222,27 +240,35 @@ def exec(instr: Instr) {
 
     SetVxVy(x, y) => V[x] = V[y];
 
-    OrVxVy(x, y) => V[x] |= V[y];
+    OrVxVy(x, y) => { V[x] |= V[y]; if (logicQuirks) V[0xf] = 0; }
 
-    AndVxVy(x, y) => V[x] &= V[y];
+    AndVxVy(x, y) => { V[x] &= V[y]; if (logicQuirks) V[0xf] = 0; }
 
-    XorVxVy(x, y) => V[x] ^= V[y];
+    XorVxVy(x, y) => { V[x] ^= V[y]; if (logicQuirks) V[0xf] = 0; }
 
     AddVxVy(x, y) => setVandVF(x, V[x] + V[y], boolToByte(V[x] + V[y] < V[x]));
 
     SubVxVy(x, y) => setVandVF(x, V[x] - V[y], boolToByte(V[x] >= V[y]));
 
-    ShrVxVy(x, y) => setVandVF(x, V[y] >> 1, u8.!(V[y] & 1));
+    ShrVxVy(x, y) => {
+      def src = if(shiftQuirks, V[x], V[y]);
+      setVandVF(x, src >> 1, u8.!(src & 1));
+    }
 
     RsubVxVy(x, y) => setVandVF(x, V[y] - V[x], boolToByte(V[y] >= V[x]));
 
-    ShlVxVy(x, y) => setVandVF(x, V[y] << 1, V[y] >> 7);
+    ShlVxVy(x, y) => {
+      def src = if(shiftQuirks, V[x], V[y]);
+      setVandVF(x, V[y] << 1, src >> 7);
+    }
 
     SkipVxNeVy(x, y) => if (V[x] != V[y]) nextPC += 2;
 
     SetINNN(nnn) => I = nnn;
 
-    SetPCNNNV0(nnn) => nextPC = nnn + V[0];
+    SetPCNNNV0(nnn) => {
+      nextPC = nnn + if(jumpQuirks, V[(nnn >> 8) & 15], V[0]);
+    }
 
     SetVxRandom(x, nn) => V[x] = u8.!(Random.random(256) & nn);
 
@@ -272,12 +298,12 @@ def exec(instr: Instr) {
 
     StoreRegs(x) => {
       for (n = 0; n <= x; n++) mem[I + n] = V[n];
-      I += u16.!(x + 1);
+      if (!loadStoreQuirks) I += u16.!(x + 1);
     }
 
     LoadRegs(x) => {
       for (n = 0; n <= x; n++) V[n] = mem[I + n];
-      I += u16.!(x + 1);
+      if (!loadStoreQuirks) I += u16.!(x + 1);
     }
   }
 
